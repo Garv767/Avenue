@@ -1,0 +1,1057 @@
+# SRM KTR Opportunities Platform — Full-Proof Build Plan (Dev A + Dev B)
+
+**Stack (fixed):** Next.js (App Router, JavaScript, `src/`, alias `@/*`) · Tailwind CSS · Supabase (Postgres + Auth) · Vercel
+**Team:** Dev A = Foundation (data, auth, forms, admin, deploy) · Dev B = Frontend (layout, cards, public pages, polish)
+**Goal:** Placement-help site with jobs, hackathons, learning resources, a consent-based "Marquee Wall", SRM-email-only login and admin moderation.
+
+---
+
+## 1. Principles (why this plan does not break)
+
+1. **One seam:** `src/lib/api.js` and `src/lib/auth.js` (Dev A writes, Dev B only calls). Signatures never change.
+2. **Mock first:** Dev A ships stubs with fake data in A1, so Dev B is never blocked. Real Supabase is swapped in later (A5) behind the same functions.
+3. **Strict file ownership:** nobody edits the other's files. Conflicts become impossible by design.
+4. **Security in the database, not just the UI:** RLS policies and an auth trigger enforce SRM-only signup, `approved=false` on insert, admin-only approval, and wall consent.
+5. **Ethics:** no scraped or forwarded private data. Wall entries appear only with `consent_given = true AND approved = true`.
+
+---
+
+## 2. File Ownership
+
+| Dev A owns | Dev B owns |
+|---|---|
+| `/supabase/*` (schema, trigger, seed) | `src/app/layout.js`, `src/app/globals.css` |
+| `src/lib/*` (`api.js`, `auth.js`, `supabaseClient.js`, `mockData.js`) | `src/app/page.js` (landing) |
+| `src/app/login`, `signup`, `submit`, `wall/submit`, `admin` | `src/app/opportunities/*` (jobs, hackathons) |
+| `.env.local.example`, `CONTRACT.md`, `PROGRESS_A.md` | `src/app/learn`, `wall/page.js`, `about`, `not-found.js` |
+| Vercel + domain + Supabase dashboard setup | `src/components/*`, `PROGRESS_B.md` |
+
+**Shared read-only:** `package.json`. Only Dev A adds dependencies; Dev B asks Dev A.
+
+---
+
+## 3. Target File Tree (final state)
+
+```
+srm-opportunities/
+├── .env.local.example        [A]
+├── .env.local                [local only, gitignored]
+├── CONTRACT.md               [A]
+├── PROGRESS_A.md             [A]
+├── PROGRESS_B.md             [B]
+├── package.json
+├── supabase/
+│   ├── schema.sql            [A]
+│   ├── auth_domain_trigger.sql [A]
+│   └── seed.sql              [A]
+├── public/
+│   ├── favicon.ico           [B]
+│   └── og-image.png          [B]
+└── src/
+    ├── app/
+    │   ├── layout.js         [B]
+    │   ├── globals.css       [B]
+    │   ├── page.js           [B]  /
+    │   ├── not-found.js      [B]
+    │   ├── opportunities/
+    │   │   ├── jobs/page.js         [B]
+    │   │   └── hackathons/page.js   [B]
+    │   ├── learn/page.js     [B]
+    │   ├── wall/
+    │   │   ├── page.js       [B]
+    │   │   └── submit/page.js [A]
+    │   ├── about/page.js     [B]
+    │   ├── login/page.js     [A]
+    │   ├── signup/page.js    [A]
+    │   ├── submit/page.js    [A]
+    │   └── admin/page.js     [A]
+    ├── components/            [B]
+    │   ├── Navbar.js
+    │   ├── Footer.js
+    │   ├── JobCard.js
+    │   ├── HackathonCard.js
+    │   ├── ResourceCard.js
+    │   ├── WallCard.js
+    │   ├── Skeleton.js
+    │   └── StateMessage.js   (loading / empty / error)
+    └── lib/                   [A]
+        ├── supabaseClient.js
+        ├── mockData.js
+        ├── api.js
+        └── auth.js
+```
+
+---
+
+## 4. Shared Contract (frozen — changes need BOTH devs' agreement)
+
+### Database
+| Table | Columns |
+|---|---|
+| `jobs` | id, title, company, type (`internship`\|`full-time`), apply_link, deadline (date), posted_at (default now), approved (default false) |
+| `hackathons` | id, name, organizer, mode (`online`\|`offline`), register_link, deadline, posted_at, approved (default false) |
+| `resources` | id, category (`DSA`\|`Web Dev`\|`AI/ML`\|…), title, link, description, approved (default false) |
+| `marquee_wall` | id, student_name, company, role, batch, linkedin (optional), tips (optional), consent_given (bool), approved (default false) |
+
+### Data layer — `src/lib/api.js`
+Every function is async and returns `{ data, error }`. `data` is **always an array** (never null); `error` is `null` or a **string** (never thrown).
+
+- `getApprovedJobs()` newest first
+- `getLatestJobs(n)`
+- `getApprovedHackathons()` soonest deadline first
+- `getLatestHackathons(n)`
+- `getApprovedResources()`
+- `getApprovedWall()` → `approved = true AND consent_given = true`
+- `submitJob / submitHackathon / submitResource / submitWallEntry(obj)` → always inserts `approved=false`
+- Admin (A only): `getPending(table)`, `approveRow(table, id)`, `rejectRow(table, id)`
+
+### Auth — `src/lib/auth.js`
+- `useUser()` → `{ user, loading }` (user null when logged out)
+- `signOut()` → Promise
+- `isAdmin(user)` → boolean (compares to `NEXT_PUBLIC_ADMIN_EMAIL`)
+- Only `@srmist.edu.in` emails may sign up or log in.
+
+### Component props (B)
+`<JobCard job={row} />` · `<HackathonCard hackathon={row} />` · `<ResourceCard resource={row} />` · `<WallCard entry={row} />` (whole DB row, exact column names).
+
+### Env vars
+`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_ADMIN_EMAIL`, `NEXT_PUBLIC_USE_MOCK`. Never commit `.env.local`.
+
+### Design tokens (both follow)
+Primary `indigo-600` (hover `indigo-700`) · bg `slate-50` · text `slate-900` · muted `slate-600`
+Card: `bg-white rounded-xl border border-slate-200 shadow-sm p-5`
+Container: `max-w-6xl mx-auto px-4 py-8` · Button: `rounded-lg px-4 py-2 font-medium`
+Input: `w-full rounded-lg border border-slate-300 px-3 py-2 focus:ring-2 focus:ring-indigo-500`
+Mobile-first (base = mobile, then `sm:` `md:` `lg:`). All pages are `"use client"`.
+
+---
+
+## 5. Dev A Plan — Foundation (branch `feat/foundation`)
+
+| ID | Task | Acceptance criteria |
+|---|---|---|
+| **A0** | Scaffold: `create-next-app` (JS, ESLint, Tailwind, `src/`, App Router, `@/*`); git init; private GitHub repo; push `main`. Create **every route** as a placeholder `page.js`, empty `components/` and `lib/`. Add `CONTRACT.md`. Invite Dev B. Create `feat/foundation`. | `npm run dev` works; all placeholder routes on GitHub |
+| **A1** | **Stubs:** install `@supabase/supabase-js`; create `supabaseClient.js`, `mockData.js` (5 fake rows per table, titles marked TEST), `api.js` + `auth.js` with ALL contract functions on mock data; `.env.local.example`. **Merge to main → "SYNC 1 done".** | Every function returns `{data:[...], error:null}`; build passes |
+| **A2** | Supabase project (region near India). `schema.sql`: 4 tables + RLS. Policies: public SELECT approved rows (wall also needs consent); INSERT for authenticated only, forced `approved=false` (wall requires `consent_given=true`); admin-only SELECT of pending, UPDATE, DELETE via `auth.jwt() ->> 'email'`. | Tables visible; anon cannot read unapproved or write |
+| **A3** | `auth_domain_trigger.sql`: trigger on `auth.users` rejecting non-`@srmist.edu.in`. Configure Email provider. | gmail signup fails at DB level; srmist works |
+| **A4** | Signup + Login pages; real `useUser / signOut / isAdmin`; client domain check, loading states, redirect to `/`, email-confirmation message. | Full signup → confirm → login → logout works |
+| **A5** | **Swap `api.js` to real Supabase**, signatures identical, keep `USE_MOCK` flag. **Merge → "SYNC 2 done".** | Real approved rows only; errors returned as strings |
+| **A6** | `/submit`: dropdown Job/Hackathon/Resource, conditional fields, URL validation, login required, success message. | Row in Supabase with `approved=false`, not on public feeds |
+| **A7** | `/wall/submit`: name, company, role, batch, LinkedIn/tips optional, **required consent checkbox**. | Cannot submit without consent; DB rejects `consent_given=false` via API |
+| **A8** | `/admin`: `isAdmin` only, pending cards across 4 tables, Approve (set true) / Reject (delete). RLS also enforces admin. | Non-admin redirected AND blocked at API |
+| **A9** | `seed.sql` (fake rows, deletable) + E2E checklist (Section 8). | Checklist passes |
+| **A10** | Vercel import, env vars (all 4, `USE_MOCK=false`), redeploy, domain + DNS, Supabase Site URL + redirect URLs. | Live URL works with login |
+| **A11** | Audit: all contract functions exist, lint + build clean, notes for B. **PR `feat/foundation` → `main`.** | PR open, green |
+
+---
+
+## 6. Dev B Plan — Frontend (branch `feat/frontend`)
+
+| ID | Task | Acceptance criteria |
+|---|---|---|
+| **B0** | After SYNC 1: clone, `npm install`, copy `.env.local.example` → `.env.local` (`USE_MOCK=true`), branch `feat/frontend`, run dev. | `localhost:3000` loads |
+| **B1** | Layout: `Navbar` (logo, Jobs/Hackathons/Learn/Wall/Submit/About, Login/Signup or email + Logout, Admin link if `isAdmin`, mobile hamburger), `Footer`, `globals.css`, metadata. | Same navbar on every route; works at 375px |
+| **B2** | Cards with exact prop contract. "Closing soon" if deadline ≤ 7 days, "Expired" if past; external links `target="_blank" rel="noopener noreferrer"`; wall LinkedIn/tips only if present. | Renders mock rows; missing optionals handled |
+| **B3** | Landing: hero, CTAs (Explore / Sign Up → Submit if logged in), 3 latest jobs + 3 hackathons, "How it works" strip. | Responsive; loading + empty states |
+| **B4** | Jobs page: loading/empty/error states, filters All/Internship/Full-time, client-side search on company/role. | Filters + search combine correctly |
+| **B5** | Hackathons page: soonest first, filter All/Online/Offline, "closing soon" toggle. | Filter + toggle combine |
+| **B6** | Learn page: group by category dynamically, anchor nav bar. | No hardcoded category list |
+| **B7** | `/wall`: grid of WallCards, opt-in/consent note, button to `/wall/submit`. | Explicit consent note visible |
+| **B8** | About: purpose, data sourcing, privacy, wall consent policy, contact. Real copy. | No placeholder text |
+| **B9** | Mobile + a11y pass at 375/768/1280: no horizontal scroll, tap targets ≥ 44px, alt/aria, focus rings, keyboard hamburger. | Fix list documented |
+| **B10** | Skeleton loaders, `not-found.js`, favicon, Open Graph tags. | Link preview works on WhatsApp |
+| **B11** | Audit: only owned files touched; lint + build with `USE_MOCK` true and false; list data assumptions. **PR `feat/frontend` → `main`.** | PR open, green |
+
+---
+
+## 7. Sync Points & Timeline
+
+| Sync | Trigger | Action |
+|---|---|---|
+| **SYNC 1** | A1 done | A merges to main; B clones and starts |
+| **SYNC 2** | A5 done | B pulls main, sets `USE_MOCK=false`, retests B3–B7 |
+| **SYNC 3** | A8 + B7 done | Both merge; test signup → submit → approve → public |
+| **FINAL** | A11 + B11 done | Merge A's PR first, then B rebases and merges; then A10 deploy + seed real content |
+
+**Suggested schedule**
+
+| Day | Dev A | Dev B |
+|---|---|---|
+| 1 | A0, A1 (SYNC 1) | Wait → B0, B1 |
+| 2 | A2, A3 | B2, B3 |
+| 3 | A4, A5 (SYNC 2) | B4, B5 |
+| 4 | A6, A7 | B6, B7, B8 |
+| 5 | A8 (SYNC 3), A9 | B9, B10 |
+| 6 | A10, A11 | B11, merge |
+| 7 | Together: real content + final test | Together |
+
+---
+
+## 8. Full-Proof Test Checklist (A9 / before launch)
+
+**Auth**
+- [ ] Signup with `@srmist.edu.in` works; confirmation email arrives
+- [ ] Signup with gmail fails (UI error AND DB trigger via direct API call)
+- [ ] Login, logout, and refresh keep the session correctly
+
+**Submission → moderation → public**
+- [ ] Logged-out user cannot open `/submit` or `/wall/submit` (redirect to `/login`)
+- [ ] Submitted job/hackathon/resource lands as `approved=false` and is NOT on public pages
+- [ ] Admin sees it in `/admin`, approves, and it appears publicly
+- [ ] Reject deletes the row
+- [ ] Non-admin user is redirected from `/admin` and cannot UPDATE/DELETE via API
+
+**Wall / privacy**
+- [ ] Cannot submit without consent checkbox; API insert with `consent_given=false` is rejected
+- [ ] Wall shows only `approved AND consent_given` rows
+- [ ] No private data (emails, WhatsApp/Gmail content) anywhere in DB or UI
+
+**Frontend**
+- [ ] Every route works at 375 / 768 / 1280 with no horizontal scroll
+- [ ] Loading, empty, and error states appear on every feed
+- [ ] External links open in a new tab with `rel="noopener noreferrer"`
+- [ ] Filters and search combine correctly; categories are dynamic
+
+**Deploy**
+- [ ] `npm run lint` and `npm run build` pass with `USE_MOCK=true` and `false`
+- [ ] Vercel env vars set; Supabase Site URL and redirect URLs include the live domain
+- [ ] `.env.local` is not in Git; anon key only (never service-role key) in the frontend
+- [ ] TEST/seed rows deleted before launch
+
+---
+
+## 9. Loop Protocol (each dev, with their AI pair-programmer)
+
+1. Open `PROGRESS_<A|B>.md`; find the first unchecked task.
+2. Restate the task and acceptance criteria in 2 lines.
+3. Implement ONLY that task, ONLY in owned files.
+4. Run `npm run lint` and `npm run build`; fix errors; verify each acceptance criterion honestly.
+5. Commit with `[A-03] short description` (or `[B-03]`) and push to your branch.
+6. Tick the task; leave a one-line note for the partner if needed.
+7. Reply with: **DONE / FILES TOUCHED / HOW TO TEST / CONTRACT CHANGES (none) / NEXT TASK**.
+8. Stop and wait for `next` (or `next 3`). Pasted errors are fixed inside the current task.
+
+---
+
+## 10. Git Workflow
+
+- `main` = always deployable. A: `feat/foundation`, B: `feat/frontend`. Never commit directly to `main` after SYNC 1 except A's stub merges.
+- Small commits, one per task. `git pull origin main` before starting each day.
+- Merge order at FINAL: A's PR first, then B runs `git pull origin main --rebase` and merges.
+- Ownership rules mean no merge conflicts. If one appears, someone edited a file they don't own: revert that change.
+
+---
+
+## 11. Risk Register
+
+| Risk | Prevention |
+|---|---|
+| Contract drift between devs | `CONTRACT.md` frozen; changes need both devs' approval |
+| B blocked waiting for backend | A1 stubs + `USE_MOCK` flag |
+| Non-SRM signup via API | DB trigger (A3), not just client check |
+| Anyone approving own rows | RLS admin-only UPDATE/DELETE (A2/A8) |
+| Wall shows non-consenting person | RLS + API filter + required checkbox + DB check |
+| Leaked keys | `.env.local` gitignored; only anon key in frontend |
+| Auth redirect broken on live site | Update Supabase Site URL + redirect URLs in A10 |
+| Empty site at launch | Split step 13.3 & 16 by hand: collect 10–15 real wall entries, real jobs, hackathons, resources |
+| Spam submissions | Login required + admin approval + optional URL validation |
+
+---
+
+## 12. Human Tasks (not AI tasks — split between you both)
+
+- Ask 10–15 seniors to fill the wall form with consent.
+- Collect real jobs, hackathons, resources from public sources or your own findings.
+- Buy the domain (A10) and share the launch link.
+
+---
+
+## 13. Definition of Done
+
+- All A0–A11 and B0–B11 ticked in the PROGRESS files
+- Section 8 checklist fully passes on the **live** URL
+- Real content seeded, fake rows removed
+- Both PRs merged, Vercel deployed from `main`
+# SRM KTR Opportunities Platform — Antigravity Prompt Sequence
+
+## How to use this file
+1. Decide who is **Dev A** and who is **Dev B**. Dev A needs to be comfortable installing things and clicking through Supabase; Dev B just needs to be okay following instructions.
+2. Each of you opens **your own** Antigravity project/chat.
+3. Copy **Prompt 1** (for your track) into Antigravity exactly as written, including the code fences' contents. Send it.
+4. Let Antigravity finish. Read its "HOW TO TEST" steps and actually do them.
+5. If it shows an error, paste the exact error back into the same chat before doing anything else.
+6. Once it works, copy the **next numbered prompt** into the same chat. Keep going in order — never skip.
+7. Dev A must reach **"SYNC 1"** (end of Prompt A2) before Dev B starts Prompt B1.
+8. Dev A must reach **"SYNC 2"** (end of Prompt A6) before Dev B continues past Prompt B4 with real data.
+9. Do not paste Dev A prompts into Dev B's chat or vice versa.
+
+---
+---
+
+# 🅰️ DEV A TRACK — Foundation (Backend, Auth, Forms, Admin, Deploy)
+
+Paste these prompts **in this exact order**, one at a time, into your Antigravity chat.
+
+---
+
+## PROMPT A1 — Scaffold the project + create every route file
+
+```
+You are a senior full-stack developer acting as my pair-programmer in Antigravity. I am a beginner — explain every terminal command before I run it, and give me exact commands to copy-paste. Do not skip steps.
+
+=== PROJECT: SRM KTR Opportunities Platform (placement help site) ===
+Stack (fixed, never change): Next.js (App Router, JavaScript, src/ directory, import alias @/*), Tailwind CSS, Supabase (Postgres + Auth), deployed on Vercel. Every page is a Client Component ("use client") for simplicity.
+
+TWO DEVELOPERS work in parallel on separate branches. I am DEV A. My partner is DEV B and will build the public-facing UI in a separate repo clone on their own machine. You must ONLY create/edit files that Dev A owns (see ownership below). If you think this contract needs to change, STOP and tell me instead of changing it silently.
+
+--- FILE OWNERSHIP ---
+Dev A (me) owns: /supabase/*, src/lib/*, src/app/login, src/app/signup, src/app/submit, src/app/wall/submit, src/app/admin, .env.local.example, CONTRACT.md, PROGRESS_A.md, Vercel/domain setup.
+Dev B owns: src/app/layout.js, src/app/globals.css, src/app/page.js, src/app/opportunities/*, src/app/learn, src/app/wall/page.js, src/app/about, src/app/not-found.js, src/components/*, PROGRESS_B.md.
+Shared/read-only: package.json (only I add dependencies; Dev B is not allowed to).
+
+--- DATABASE TABLES (exact names and columns, do not rename anything) ---
+jobs: id (auto pk), title text, company text, type text ('internship' or 'full-time'), apply_link text, deadline date, posted_at timestamp default now(), approved boolean default false
+hackathons: id (auto pk), name text, organizer text, mode text ('online' or 'offline'), register_link text, deadline date, posted_at timestamp default now(), approved boolean default false
+resources: id (auto pk), category text ('DSA','Web Dev','AI/ML', etc), title text, link text, description text, approved boolean default false
+marquee_wall: id (auto pk), student_name text, company text, role text, batch text, linkedin text (optional), tips text (optional), consent_given boolean, approved boolean default false
+
+--- DATA LAYER CONTRACT: src/lib/api.js (I write this, Dev B only calls it) ---
+Every function is async and returns { data, error }. data is ALWAYS an array (never null). error is null or a string (never thrown).
+getApprovedJobs() -> approved jobs, newest first
+getLatestJobs(n) -> newest n approved jobs
+getApprovedHackathons() -> approved hackathons, soonest deadline first
+getLatestHackathons(n) -> n approved hackathons soonest deadline first
+getApprovedResources() -> approved resources
+getApprovedWall() -> rows where approved=true AND consent_given=true
+submitJob(obj) / submitHackathon(obj) / submitResource(obj) / submitWallEntry(obj) -> { data, error }, always inserts approved=false
+Admin only: getPending(table), approveRow(table,id), rejectRow(table,id)
+
+--- AUTH CONTRACT: src/lib/auth.js (I write this, Dev B only calls it) ---
+useUser() -> { user, loading } (user is null when logged out; user.email available when logged in)
+signOut() -> Promise
+isAdmin(user) -> boolean, compares user.email to NEXT_PUBLIC_ADMIN_EMAIL
+Signup/login allowed ONLY for emails ending in @srmist.edu.in
+
+--- COMPONENT PROP CONTRACT (Dev B builds these, I never touch them) ---
+<JobCard job={row} /> <HackathonCard hackathon={row} /> <ResourceCard resource={row} /> <WallCard entry={row} />
+Each takes the whole DB row using the exact column names above.
+
+--- ROUTES ---
+Dev B builds: / , /opportunities/jobs , /opportunities/hackathons , /learn , /wall , /about
+I (Dev A) build: /login , /signup , /submit , /wall/submit , /admin
+
+--- ENV VARS (names fixed, never rename) ---
+NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY, NEXT_PUBLIC_ADMIN_EMAIL, NEXT_PUBLIC_USE_MOCK
+Never commit .env.local to git.
+
+--- DESIGN TOKENS (Dev B enforces these visually, but keep in mind) ---
+Primary color indigo-600 (hover indigo-700), page background slate-50, text slate-900, muted text slate-600.
+Cards: "bg-white rounded-xl border border-slate-200 shadow-sm p-5"
+Page container: "max-w-6xl mx-auto px-4 py-8"
+Buttons: "rounded-lg px-4 py-2 font-medium"
+Inputs: "w-full rounded-lg border border-slate-300 px-3 py-2 focus:ring-2 focus:ring-indigo-500"
+Mobile-first: base Tailwind classes = mobile, then sm:/md:/lg: for larger screens.
+
+--- ETHICS RULES (non-negotiable) ---
+No scraped or forwarded private data from Gmail/WhatsApp/college portal ever. Marquee wall entries only ever display publicly if consent_given = true AND approved = true.
+
+=== MY TASK RIGHT NOW: A0 — Scaffold + repo ===
+Do the following, explaining each command before I run it:
+1. Guide me to run create-next-app with these exact options: JavaScript (not TypeScript), ESLint yes, Tailwind CSS yes, src/ directory yes, App Router yes, import alias @/* yes. Project name: srm-opportunities.
+2. Tell me the exact `git init`, `git add`, `git commit` commands (if create-next-app didn't already init git).
+3. Walk me through creating a new PRIVATE repository on GitHub called srm-opportunities and pushing this project to it as `main`, with exact commands.
+4. Create EVERY route file listed in the ROUTES section above as a minimal placeholder: each page.js should be a Client Component that just returns a heading with the route name, e.g. <h1>Jobs Page</h1>. Create empty folders src/components/ and src/lib/ (with a .gitkeep file if needed so Git tracks the empty folder).
+5. Create a file CONTRACT.md at the project root containing the ENTIRE shared contract text above (everything between "=== PROJECT:" and the ETHICS RULES section), formatted cleanly as markdown, so both developers can always refer back to it.
+6. Tell me exactly how to add my partner as a GitHub collaborator (Settings > Collaborators) — just the menu path, I'll do the clicking.
+7. Create a new git branch called feat/foundation and switch to it, with exact commands.
+
+Acceptance criteria: `npm run dev` shows a working homepage at localhost:3000; every route above returns a placeholder page without errors; the GitHub repo has all these files on main; I am now on branch feat/foundation.
+
+When done, reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: A1 — Stubs for the seam
+```
+
+---
+
+## PROMPT A2 — Mock stubs for api.js and auth.js (unblocks Dev B)
+
+```
+Continue as Dev A on this same project. Re-read CONTRACT.md in the repo before doing anything, and follow the same file-ownership and contract rules as before.
+
+=== MY TASK RIGHT NOW: A1 — Stubs for the seam ===
+1. Install the Supabase JS client: tell me the exact npm command.
+2. Create src/lib/supabaseClient.js that creates and exports a Supabase client using process.env.NEXT_PUBLIC_SUPABASE_URL and process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY.
+3. Create src/lib/mockData.js containing 5 realistic fake rows for EACH of the 4 tables (jobs, hackathons, resources, marquee_wall), matching the exact column names from CONTRACT.md. Put the word "TEST" clearly inside each title/name field so we can spot fake data later, e.g. "TEST - Frontend Intern at Acme".
+4. Create src/lib/api.js implementing EVERY function listed in the Data Layer Contract in CONTRACT.md. For now, all of them should read from mockData.js and simulate a real async call (e.g. a tiny artificial delay), returning { data: [...], error: null } in the exact shape specified. Submit functions (submitJob, submitHackathon, submitResource, submitWallEntry) should just log the object to console and return { data: [obj], error: null } for now — do not persist anything yet. Admin functions (getPending, approveRow, rejectRow) should also work against mockData.js in memory.
+5. Create src/lib/auth.js implementing useUser(), signOut(), and isAdmin(user) exactly as specified in CONTRACT.md. For now, useUser() should return a fake logged-out user: { user: null, loading: false }. isAdmin should still do the real comparison logic against process.env.NEXT_PUBLIC_ADMIN_EMAIL so it's ready for later.
+6. Create .env.local.example at the project root listing all 4 env vars from CONTRACT.md with placeholder values, plus a comment explaining where to get each one.
+7. Double check every function signature matches CONTRACT.md exactly (function names, parameter names, return shape). List them out and confirm each one exists.
+8. Run `npm run lint` and `npm run build`, fix any errors.
+9. Commit with message "[A-01] mock stubs for api.js and auth.js" and push to feat/foundation.
+10. Merge feat/foundation into main (or open and merge a PR — tell me the exact commands either way) so Dev B can clone a working version.
+
+Acceptance criteria: every contract function exists and returns the correct shape; build passes; main branch on GitHub now has working stubs.
+
+When fully done and merged to main, reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: A2 — Supabase project + schema.sql
+ALSO TELL ME: "Tell your partner: SYNC 1 done — they can now clone the repo and start Prompt B1."
+```
+
+---
+
+## PROMPT A3 — Supabase project + schema + Row Level Security
+
+```
+Continue as Dev A on this same project, following CONTRACT.md exactly.
+
+=== MY TASK RIGHT NOW: A2 — Supabase setup + SQL schema ===
+1. Walk me step by step through creating a free Supabase project at https://supabase.com — tell me to pick a region close to India (e.g. Mumbai / ap-south-1 if offered), and exactly where in the dashboard to find the Project URL and the anon public API key afterward.
+2. Tell me exactly how to fill in my real .env.local (copy from .env.local.example, fill in the real Supabase URL and anon key, set NEXT_PUBLIC_ADMIN_EMAIL to my own @srmist.edu.in email, set NEXT_PUBLIC_USE_MOCK=true for now).
+3. Create a file supabase/schema.sql that:
+   - Creates all 4 tables (jobs, hackathons, resources, marquee_wall) EXACTLY as specified in CONTRACT.md, with correct types and defaults.
+   - Enables Row Level Security (RLS) on all 4 tables.
+   - Adds a SELECT policy allowing anyone (anon) to read rows where approved = true (for marquee_wall, additionally require consent_given = true).
+   - Adds an INSERT policy allowing only authenticated users to insert, and the policy must force approved = false on insert (for marquee_wall, also force consent_given = true on insert — reject inserts where consent_given is false or null).
+   - Adds admin-only policies: SELECT of pending (approved = false) rows, UPDATE, and DELETE, all restricted to auth.jwt() ->> 'email' equal to my admin email (use a placeholder like 'ADMIN_EMAIL_HERE' and tell me exactly which line to edit with my real email).
+4. Tell me exactly how to run this SQL: open the Supabase dashboard > SQL Editor > paste the contents of schema.sql > Run.
+5. After I run it, tell me how to verify in Table Editor that all 4 tables exist with the right columns.
+6. Commit supabase/schema.sql to feat/foundation with message "[A-02] supabase schema + RLS policies" and push.
+
+Acceptance criteria: all 4 tables visible in Supabase Table Editor with RLS enabled; an anonymous user cannot read unapproved rows or insert data that violates the policies (explain how I could quickly test this using the Supabase API docs "Test" tab if easy, otherwise just describe how to verify by reading the policies).
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: A3 — Enforce SRM-only email at the database level
+```
+
+---
+
+## PROMPT A4 — Enforce SRM-only signup at the database level
+
+```
+Continue as Dev A, following CONTRACT.md.
+
+=== MY TASK RIGHT NOW: A3 — SRM-only auth enforced on the server ===
+1. Create supabase/auth_domain_trigger.sql containing a Postgres trigger function that runs BEFORE INSERT on auth.users, and RAISES AN EXCEPTION (rejecting the signup) if the new user's email does NOT end in '@srmist.edu.in'. Attach the trigger to auth.users.
+2. Explain clearly why this matters even though the signup form will also check this client-side (client-side checks can be bypassed by calling the API directly, so the database must be the real gatekeeper).
+3. Tell me exactly how to run this SQL in the Supabase SQL Editor.
+4. Tell me exactly where in the Supabase dashboard to check that Email auth provider is enabled (Authentication > Providers > Email), and whether "Confirm email" should be ON (yes, keep it on, and tell me why).
+5. Tell me how to manually test this: try to sign up a test user with a gmail.com address directly from the Supabase dashboard's Authentication > Users > "Add user" (or explain the simplest way to test it before the real signup page exists in A4-next).
+6. Commit supabase/auth_domain_trigger.sql to feat/foundation with message "[A-03] enforce SRM-only email via db trigger" and push.
+
+Acceptance criteria: attempting to create a non-srmist.edu.in user fails at the database level with a clear error; srmist.edu.in emails are unaffected.
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: A4 — Real Signup and Login pages
+```
+
+---
+
+## PROMPT A5 — Signup, Login pages, and real auth.js functions
+
+```
+Continue as Dev A, following CONTRACT.md and the design tokens in it.
+
+=== MY TASK RIGHT NOW: A4 — Signup + Login pages, real useUser/signOut/isAdmin ===
+1. Update src/lib/auth.js so useUser(), signOut(), and isAdmin(user) now use the REAL Supabase client from supabaseClient.js instead of fake data. useUser() must use Supabase's onAuthStateChange (or getSession + listener) to track the logged-in user reactively and return { user, loading } exactly as the contract specifies.
+2. Build src/app/signup/page.js: email + password form, client-side check that the email ends in @srmist.edu.in with a clear friendly error message if not ("Please use your SRM email (@srmist.edu.in) to sign up."), loading state while submitting, and after signup show a message telling the user to check their email to confirm.
+3. Build src/app/login/page.js: email + password form, loading state, on success redirect to "/", on failure show the Supabase error message in plain language.
+4. Style both forms using the exact design tokens from CONTRACT.md (container, inputs, buttons, colors).
+5. Run `npm run lint` and `npm run build`, fix any errors.
+6. Commit to feat/foundation with message "[A-04] signup and login pages + real auth.js" and push.
+
+Acceptance criteria: I can sign up with a real @srmist.edu.in email, confirm via the email link, log in, and get redirected to the homepage; logging out works; attempting signup with a non-srmist email is blocked in the UI before even hitting the database.
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: A5 — Swap api.js to real Supabase (SYNC 2)
+```
+
+---
+
+## PROMPT A6 — Swap api.js to real Supabase (SYNC 2)
+
+```
+Continue as Dev A, following CONTRACT.md exactly. Do not change any function names or parameters — Dev B's code already calls these functions and must keep working unchanged.
+
+=== MY TASK RIGHT NOW: A5 — Swap api.js to real Supabase, keep mock fallback ===
+1. Rewrite every function inside src/lib/api.js to query the real Supabase tables instead of mockData.js, but keep the EXACT same function names, parameters, and return shape { data, error } (data always an array, error always null or a string — never let a Supabase error object leak out raw, always convert it to error.message as a string).
+2. Add a check at the top of api.js: if process.env.NEXT_PUBLIC_USE_MOCK === 'true', keep using mockData.js as before; otherwise use the real Supabase queries. This lets Dev B flip back to mock mode anytime if something breaks.
+3. Implement each function's real query:
+   - getApprovedJobs(): select * from jobs where approved = true, order by posted_at desc
+   - getLatestJobs(n): same but limit n
+   - getApprovedHackathons(): select * from hackathons where approved = true, order by deadline asc
+   - getLatestHackathons(n): same but limit n
+   - getApprovedResources(): select * from resources where approved = true
+   - getApprovedWall(): select * from marquee_wall where approved = true and consent_given = true
+   - submitJob/submitHackathon/submitResource/submitWallEntry(obj): insert obj into the right table, forcing approved: false (and consent_given as given by the user for wall) regardless of what's passed in
+   - getPending(table): select * from [table] where approved = false
+   - approveRow(table, id): update [table] set approved = true where id = id
+   - rejectRow(table, id): delete from [table] where id = id
+4. Run `npm run lint` and `npm run build` with NEXT_PUBLIC_USE_MOCK=false in my local .env.local, fix any errors.
+5. Commit to feat/foundation with message "[A-05] real supabase queries in api.js, keep mock fallback" and push, then merge/PR feat/foundation into main.
+
+Acceptance criteria: with NEXT_PUBLIC_USE_MOCK=false, all read functions return only real approved rows from Supabase; all functions still return the { data, error } shape exactly; errors are always strings, never thrown exceptions that crash the page.
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: A6 — Build the /submit page
+ALSO TELL ME: "Tell your partner: SYNC 2 done — they can pull main, set NEXT_PUBLIC_USE_MOCK=false, and retest their pages against real data."
+```
+
+---
+
+## PROMPT A7 — /submit page
+
+```
+Continue as Dev A, following CONTRACT.md and its design tokens.
+
+=== MY TASK RIGHT NOW: A6 — /submit page ===
+Build src/app/submit/page.js:
+1. If the user is not logged in (useUser()), redirect them to /login.
+2. A dropdown to choose what they're submitting: Job / Hackathon / Resource.
+3. Show the correct form fields depending on the selected type, matching each table's exact columns from CONTRACT.md (e.g. Job needs title, company, type, apply_link, deadline; Hackathon needs name, organizer, mode, register_link, deadline; Resource needs category, title, link, description).
+4. Validate: all required fields filled, apply_link/register_link/link must be a valid URL, deadline must be a valid date not in the past. Disable the Submit button until the form is valid.
+5. On submit, call the correct function from src/lib/api.js (submitJob / submitHackathon / submitResource) with the form data.
+6. On success show a clear message: "Thanks! Your submission is under review." and clear the form.
+7. Style everything with the exact design tokens from CONTRACT.md.
+8. Run `npm run lint` and `npm run build`, fix errors.
+9. Commit to feat/foundation with message "[A-06] submit page for jobs/hackathons/resources" and push.
+
+Acceptance criteria: submitting creates a row in Supabase with approved=false, and it does NOT show up on any public page; logged-out users are redirected to /login; invalid URLs or past deadlines are blocked before submission.
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: A7 — /wall/submit page
+```
+
+---
+
+## PROMPT A8 — /wall/submit page
+
+```
+Continue as Dev A, following CONTRACT.md and its design tokens.
+
+=== MY TASK RIGHT NOW: A7 — /wall/submit page ===
+Build src/app/wall/submit/page.js:
+1. If not logged in, redirect to /login.
+2. Fields: Name (required), Company (required), Role (required), Batch (required), LinkedIn URL (optional), Tips (optional, textarea).
+3. A REQUIRED checkbox with clear wording, e.g.: "I agree to have my name, company, role and batch shown publicly on the SRM Opportunities wall." The Submit button must stay disabled until this checkbox is checked.
+4. On submit, call submitWallEntry() from src/lib/api.js with consent_given explicitly set to true (only reachable if the checkbox was checked) and approved left to the database default (false).
+5. On success, show "Thanks! Your entry will appear on the wall after review."
+6. Style with the exact design tokens from CONTRACT.md.
+7. Run `npm run lint` and `npm run build`, fix errors.
+8. Commit to feat/foundation with message "[A-07] wall submit page with required consent" and push.
+
+Acceptance criteria: the form cannot be submitted without checking consent; even if someone tries to call the Supabase API directly with consent_given=false, the RLS policy from A2 rejects it (re-verify this policy is still correct).
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: A8 — /admin dashboard
+```
+
+---
+
+## PROMPT A9 — /admin dashboard
+
+```
+Continue as Dev A, following CONTRACT.md and its design tokens.
+
+=== MY TASK RIGHT NOW: A8 — /admin dashboard ===
+Build src/app/admin/page.js:
+1. If not logged in OR isAdmin(user) is false, redirect to "/" immediately.
+2. If admin, call getPending('jobs'), getPending('hackathons'), getPending('resources'), and the pending marquee_wall rows, and show them all as cards grouped by type, each with the row's details and two buttons: Approve and Reject.
+3. Approve calls approveRow(table, id) and removes the card from the pending list on success. Reject calls rejectRow(table, id) and removes the card. Show a loading spinner on the button while the action runs, and a friendly error message if it fails.
+4. Style with the exact design tokens from CONTRACT.md.
+5. Re-open supabase/schema.sql and confirm the admin UPDATE/DELETE RLS policies from A2 are correctly restricting these actions to only the admin email at the database level (not just hidden in the UI) — if anything looks wrong, fix schema.sql and tell me to re-run the corrected part in the Supabase SQL editor.
+6. Run `npm run lint` and `npm run build`, fix errors.
+7. Commit to feat/foundation with message "[A-08] admin dashboard with approve/reject" and push.
+
+Acceptance criteria: a non-admin logged-in user is redirected away from /admin and, if they try calling approveRow/rejectRow directly, the database (RLS) blocks it too — not just the UI.
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: A9 — Seed data + End-to-end test checklist
+```
+
+---
+
+## PROMPT A10 — Seed data + full end-to-end test
+
+```
+Continue as Dev A, following CONTRACT.md.
+
+=== MY TASK RIGHT NOW: A9 — Seed + E2E test ===
+1. Create supabase/seed.sql with a handful (5-8) of clearly fake rows across all 4 tables, each title/name containing the word "SEED-TEST" so they are easy to find and delete later before real launch. Some rows approved=true so the public pages have visible content to check.
+2. Tell me exactly how to run seed.sql in the Supabase SQL editor.
+3. Give me a complete end-to-end manual test checklist covering: signup with SRM email works, signup with non-SRM email is rejected, login/logout works, submitting a job/hackathon/resource/wall entry works and stays hidden until approved, admin can approve and it becomes public, admin can reject and it disappears, non-admin cannot access /admin, wall only shows entries with consent AND approved.
+4. Walk me through actually running this checklist right now, one item at a time, and tell me what to look for at each step.
+5. Commit supabase/seed.sql to feat/foundation with message "[A-09] seed data + e2e checklist" and push.
+
+Acceptance criteria: every item in the checklist passes; I have manually verified each one.
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: A10 — Deploy to Vercel + domain
+```
+
+---
+
+## PROMPT A11 — Deploy to Vercel + custom domain
+
+```
+Continue as Dev A, following CONTRACT.md.
+
+=== MY TASK RIGHT NOW: A10 — Deploy ===
+1. Walk me through importing this GitHub repo into Vercel (https://vercel.com/new), step by step, including which branch to deploy from (main, once feat/foundation is merged — tell me to merge/PR it first if not already).
+2. Tell me exactly which environment variables to add in the Vercel project settings: NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY, NEXT_PUBLIC_ADMIN_EMAIL, and NEXT_PUBLIC_USE_MOCK=false, and tell me to redeploy after adding them.
+3. If I want a custom domain, walk me through buying one (any registrar) and connecting it in Vercel's Domains settings (DNS records to add).
+4. Tell me exactly where in the Supabase dashboard (Authentication > URL Configuration) to update "Site URL" and "Redirect URLs" to include my new live Vercel/custom domain, so login/signup emails link back correctly.
+5. After deployment, re-run the key parts of the A9 checklist against the LIVE site (not localhost) to make sure everything still works in production.
+
+Acceptance criteria: the live URL works end to end — signup, login, submit, admin approve, public pages — exactly as it did locally.
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them, if any)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: A11 — Merge-readiness audit
+```
+
+---
+
+## PROMPT A12 — Merge-readiness audit + open PR
+
+```
+Continue as Dev A, following CONTRACT.md.
+
+=== MY TASK RIGHT NOW: A11 — Merge-readiness audit ===
+1. Go through CONTRACT.md and list every function required in api.js and auth.js, and confirm each one currently exists in the code with the exact right name and parameters. Flag anything missing or mismatched and fix it.
+2. Run `npm run lint` and `npm run build` one final time and fix anything that fails.
+3. List anything Dev B should double-check on their end (e.g. any small contract clarification, any known limitation).
+4. Open a Pull Request from feat/foundation into main on GitHub (tell me the exact steps/commands), with a description summarizing everything built in A0-A10.
+
+Acceptance criteria: PR is open, lint and build are both clean, and I have a clear list to share with my partner before final merge.
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: none — Dev A track complete. Wait for Dev B to finish their track, then follow the FINAL merge steps in the plan.
+```
+
+---
+---
+
+# 🅱️ DEV B TRACK — Frontend (Layout, Pages, Components, Responsiveness)
+
+⚠️ Do not start Prompt B1 until Dev A has told you **"SYNC 1 done"** (end of Prompt A2).
+
+---
+
+## PROMPT B1 — Clone repo + set up local environment
+
+```
+You are a senior full-stack developer acting as my pair-programmer in Antigravity. I am a beginner — explain every terminal command before I run it, and give me exact commands to copy-paste.
+
+=== PROJECT: SRM KTR Opportunities Platform (placement help site) ===
+Stack (fixed, never change): Next.js (App Router, JavaScript, src/ directory, import alias @/*), Tailwind CSS, Supabase (Postgres + Auth), deployed on Vercel. Every page is a Client Component ("use client").
+
+TWO DEVELOPERS work in parallel. I am DEV B (frontend). My partner is DEV A (foundation) and has already created the repo and pushed working mock versions of src/lib/api.js and src/lib/auth.js ("SYNC 1"). You must ONLY create/edit files that Dev B owns (see below). NEVER write Supabase queries or auth logic yourself — only import and call functions from src/lib/api.js and src/lib/auth.js exactly as documented below. If you think this contract needs to change, STOP and tell me instead of changing it silently.
+
+--- FILE OWNERSHIP ---
+Dev B (me) owns: src/app/layout.js, src/app/globals.css, src/app/page.js, src/app/opportunities/*, src/app/learn, src/app/wall/page.js, src/app/about, src/app/not-found.js, src/components/*, PROGRESS_B.md.
+Dev A owns: /supabase/*, src/lib/*, src/app/login, src/app/signup, src/app/submit, src/app/wall/submit, src/app/admin, .env.local.example, CONTRACT.md, PROGRESS_A.md.
+Shared/read-only: package.json (only Dev A adds dependencies; I ask Dev A if I need one).
+
+--- DATABASE COLUMN NAMES (for reference only — I never query the database directly) ---
+jobs: id, title, company, type ('internship'|'full-time'), apply_link, deadline, posted_at, approved
+hackathons: id, name, organizer, mode ('online'|'offline'), register_link, deadline, posted_at, approved
+resources: id, category, title, link, description, approved
+marquee_wall: id, student_name, company, role, batch, linkedin (optional), tips (optional), consent_given, approved
+
+--- DATA LAYER I CALL (never rewrite these, they live in src/lib/api.js) ---
+Every function is async, returns { data, error }. data is ALWAYS an array (never null). error is null or a string.
+getApprovedJobs(), getLatestJobs(n), getApprovedHackathons(), getLatestHackathons(n), getApprovedResources(), getApprovedWall()
+(submit* and admin* functions belong to Dev A's pages, I don't use them)
+
+--- AUTH I CALL (never rewrite, lives in src/lib/auth.js) ---
+useUser() -> { user, loading } (user null when logged out, user.email when logged in)
+signOut() -> Promise
+isAdmin(user) -> boolean
+
+--- COMPONENT PROP CONTRACT (I build these) ---
+<JobCard job={row} /> <HackathonCard hackathon={row} /> <ResourceCard resource={row} /> <WallCard entry={row} />
+Each takes the whole DB row using the exact column names above.
+
+--- ROUTES I BUILD ---
+/ (landing), /opportunities/jobs, /opportunities/hackathons, /learn, /wall, /about
+(Dev A builds /login, /signup, /submit, /wall/submit, /admin)
+
+--- ENV VARS (already set up by Dev A, names fixed) ---
+NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY, NEXT_PUBLIC_ADMIN_EMAIL, NEXT_PUBLIC_USE_MOCK
+
+--- DESIGN TOKENS (I must follow these everywhere so pages match) ---
+Tailwind default classes only, no custom CSS unless it goes in globals.css.
+Primary color: indigo-600 (hover: indigo-700). Page background: slate-50. Text: slate-900. Muted text: slate-600.
+Cards: "bg-white rounded-xl border border-slate-200 shadow-sm p-5"
+Page container: "max-w-6xl mx-auto px-4 py-8"
+Buttons: "rounded-lg px-4 py-2 font-medium"
+Inputs: "w-full rounded-lg border border-slate-300 px-3 py-2 focus:ring-2 focus:ring-indigo-500"
+Mobile-first: base Tailwind classes = mobile, then sm:/md:/lg: for larger screens.
+
+=== MY TASK RIGHT NOW: B0 — Clone + setup ===
+1. Tell me the exact git command to clone the repo (I will provide the GitHub URL Dev A gave me — ask me for it if you need it, or use a placeholder <REPO_URL> and tell me to replace it).
+2. Tell me the exact commands to: cd into the folder, run npm install, copy .env.local.example to .env.local.
+3. Tell me to open .env.local and set NEXT_PUBLIC_USE_MOCK=true, and fill any other values Dev A shared with me (Supabase URL/anon key/admin email) — if Dev A hasn't shared real Supabase values with me yet, tell me it's fine to leave placeholders since I'm working in mock mode.
+4. Tell me the exact command to create and switch to a new branch called feat/frontend.
+5. Tell me the exact command to run the dev server and confirm localhost:3000 loads the placeholder site Dev A created.
+
+Acceptance criteria: localhost:3000 loads without errors and shows Dev A's placeholder pages; I am on branch feat/frontend.
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them, likely none yet)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: B1 — Layout shell (Navbar + Footer)
+```
+
+---
+
+## PROMPT B2 — Layout shell: Navbar, Footer, global styles
+
+```
+Continue as Dev B on this same project. Re-read CONTRACT.md in the repo before doing anything (Dev A committed it), and follow the same file-ownership rules as before.
+
+=== MY TASK RIGHT NOW: B1 — Layout shell ===
+1. Build src/components/Navbar.js: shows the site name/logo on the left, and links Jobs, Hackathons, Learn, Wall, Submit, About. Use useUser() from src/lib/auth.js — if logged out, show Login and Signup buttons/links; if logged in, show the user's email and a Logout button (calling signOut()); if isAdmin(user) is true, also show an Admin link. Add a hamburger menu icon that appears only on small screens (below md breakpoint) and toggles a mobile dropdown menu with the same links.
+2. Build src/components/Footer.js: a short one-line description of the site plus links to About and a Privacy note (can link to the About page's privacy section).
+3. Update src/app/layout.js to wrap {children} between <Navbar /> and <Footer />, and set the page <title> and meta description.
+4. Update src/app/globals.css with any base styles needed (Tailwind's base/components/utilities imports should already be there from setup — just add any small custom tweaks if truly needed, nothing major).
+5. Style everything with the exact design tokens from CONTRACT.md.
+6. Run `npm run lint` and `npm run build`, fix any errors.
+7. Commit to feat/frontend with message "[B-01] navbar, footer, root layout" and push.
+
+Acceptance criteria: the navbar and footer appear identically on every route; at a 375px wide viewport the hamburger menu appears and opens/closes correctly; login state correctly shows different content when I temporarily fake a logged-in user for testing (tell me how to quickly fake this if useful, then revert).
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: B2 — Card components
+```
+
+---
+
+## PROMPT B3 — Card components (Job, Hackathon, Resource, Wall)
+
+```
+Continue as Dev B, following CONTRACT.md and its design tokens exactly.
+
+=== MY TASK RIGHT NOW: B2 — Cards ===
+Build these 4 components in src/components/, each using the exact card style from CONTRACT.md ("bg-white rounded-xl border border-slate-200 shadow-sm p-5"):
+
+1. JobCard.js — takes prop job={row} with columns title, company, type, apply_link, deadline. Show a "Closing soon" badge if deadline is within 7 days from today, and an "Expired" styled badge/greyed-out look if the deadline has already passed. The Apply button/link opens apply_link in a new tab with target="_blank" rel="noopener noreferrer".
+2. HackathonCard.js — takes prop hackathon={row} with columns name, organizer, mode, register_link, deadline. Same closing-soon/expired logic. Register button opens register_link the same safe way.
+3. ResourceCard.js — takes prop resource={row} with columns category, title, link, description. Link opens safely in a new tab.
+4. WallCard.js — takes prop entry={row} with columns student_name, company, role, batch, linkedin (optional), tips (optional). Only show the LinkedIn link if entry.linkedin is present; only show tips if entry.tips is present. Handle missing optional fields gracefully with no broken layout.
+
+Also create src/components/StateMessage.js: a small reusable component that takes a "type" prop ('loading' | 'empty' | 'error') and a message, and renders appropriately styled feedback (used later on every data-driven page).
+
+Run `npm run lint` and `npm run build`, fix any errors. Commit to feat/frontend with message "[B-02] card components" and push.
+
+Acceptance criteria: each card renders correctly using mock rows from src/lib/mockData.js (temporarily import a mock row just to preview, then remove the test import if you added one just for checking); missing optional fields (linkedin, tips) don't break the layout.
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: B3 — Landing page
+```
+
+---
+
+## PROMPT B4 — Landing page
+
+```
+Continue as Dev B, following CONTRACT.md and its design tokens.
+
+=== MY TASK RIGHT NOW: B3 — Landing page ===
+Build src/app/page.js (the homepage):
+1. A hero section: one clear sentence explaining the site's purpose (e.g. helping SRM KTR students find placement opportunities, hackathons and resources in one place instead of scattered across WhatsApp groups), a sub-line, and two call-to-action buttons: "Explore Opportunities" (links to /opportunities/jobs) and "Sign Up" — but if the user is already logged in (useUser()), change this second button to "Submit an Opportunity" linking to /submit instead.
+2. A preview section showing the 3 latest jobs (using getLatestJobs(3) from src/lib/api.js) and the 3 latest hackathons (using getLatestHackathons(3)), each rendered with JobCard/HackathonCard, with a "View all" link next to each section going to /opportunities/jobs or /opportunities/hackathons.
+3. Handle loading and empty states in both preview sections using StateMessage.js (e.g. "No jobs posted yet" if the array is empty).
+4. A short "How it works" strip with 3 steps: Browse, Submit, We review — simple icons or numbered circles, brief one-line descriptions each.
+5. Style everything with the exact design tokens from CONTRACT.md, mobile-first.
+6. Run `npm run lint` and `npm run build`, fix errors. Commit to feat/frontend with message "[B-03] landing page" and push.
+
+Acceptance criteria: page looks good and doesn't break at 375px and at desktop width; loading and empty states appear correctly when I temporarily test with an empty mock array.
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: B4 — Jobs page
+```
+
+---
+
+## PROMPT B5 — Jobs page
+
+```
+Continue as Dev B, following CONTRACT.md and its design tokens.
+
+=== MY TASK RIGHT NOW: B4 — Jobs page ===
+Build src/app/opportunities/jobs/page.js:
+1. Fetch all approved jobs using getApprovedJobs() from src/lib/api.js.
+2. Show a loading state while fetching, an empty state ("No jobs posted yet") if the array is empty after loading, and an error state showing the returned error string if error is not null — all using StateMessage.js.
+3. Add filter buttons: All / Internship / Full-time, filtering the job.type field client-side (no new API calls needed).
+4. Add a search box that filters client-side by company name or job title (case-insensitive, matches either field).
+5. Filters and search must work together (e.g. searching "engineer" while "Internship" filter is active only shows matching internships).
+6. Render results as JobCard components in a responsive grid (1 column mobile, more columns on larger screens).
+7. Style with the exact design tokens from CONTRACT.md.
+8. Run `npm run lint` and `npm run build`, fix errors. Commit to feat/frontend with message "[B-04] jobs page with filters and search" and push.
+
+Acceptance criteria: filters and search combine correctly; grid is responsive; loading/empty/error states all work (test error state by temporarily making getApprovedJobs throw/return an error, then revert).
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: B5 — Hackathons page
+```
+
+---
+
+## PROMPT B6 — Hackathons page
+
+```
+Continue as Dev B, following CONTRACT.md and its design tokens.
+
+=== MY TASK RIGHT NOW: B5 — Hackathons page ===
+Build src/app/opportunities/hackathons/page.js:
+1. Fetch all approved hackathons using getApprovedHackathons() (already sorted soonest deadline first by Dev A's api.js).
+2. Same loading/empty/error state pattern as the jobs page, using StateMessage.js.
+3. Filter buttons: All / Online / Offline, filtering hackathon.mode client-side.
+4. An optional "Closing soon only" toggle switch that filters to hackathons with deadline within 7 days.
+5. Filter and toggle must work together correctly.
+6. Render as HackathonCard components in a responsive grid, same pattern as jobs page.
+7. Style with the exact design tokens from CONTRACT.md.
+8. Run `npm run lint` and `npm run build`, fix errors. Commit to feat/frontend with message "[B-05] hackathons page with filter and closing-soon toggle" and push.
+
+Acceptance criteria: filter + toggle combine correctly; empty/error states present; responsive grid.
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: B6 — Learn page
+```
+
+---
+
+## PROMPT B7 — Learn page
+
+```
+Continue as Dev B, following CONTRACT.md and its design tokens.
+
+=== MY TASK RIGHT NOW: B6 — Learn page ===
+Build src/app/learn/page.js:
+1. Fetch all approved resources using getApprovedResources().
+2. Group the resources by their category field DYNAMICALLY (compute the unique list of categories from the actual data returned — do not hardcode a category list, since new categories might be added later).
+3. Show a sticky anchor navigation bar at the top listing each category found, clicking one smooth-scrolls to that category's section on the page.
+4. Under each category heading, render the matching resources using ResourceCard in a responsive grid.
+5. Handle loading, empty (no resources at all), and error states with StateMessage.js.
+6. Style with the exact design tokens from CONTRACT.md.
+7. Run `npm run lint` and `npm run build`, fix errors. Commit to feat/frontend with message "[B-06] learn page with dynamic category grouping" and push.
+
+Acceptance criteria: categories shown are always computed from real data, never hardcoded; clicking an anchor link scrolls to the right section.
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: B7 — Marquee Wall page
+```
+
+---
+
+## PROMPT B8 — Marquee Wall page
+
+```
+Continue as Dev B, following CONTRACT.md and its design tokens.
+
+=== MY TASK RIGHT NOW: B7 — /wall page ===
+Build src/app/wall/page.js:
+1. Fetch entries using getApprovedWall() (already filtered to approved AND consent_given by Dev A's api.js).
+2. Show a short intro paragraph explicitly stating this wall is OPT-IN and CONSENT-BASED — students choose to share their placement story, nothing is scraped or added without permission.
+3. Render entries as WallCard components in a responsive grid.
+4. Include a clear, visible button/link: "Share your placement story" linking to /wall/submit.
+5. Handle loading, empty ("No stories yet — be the first to share!"), and error states with StateMessage.js.
+6. Style with the exact design tokens from CONTRACT.md.
+7. Run `npm run lint` and `npm run build`, fix errors. Commit to feat/frontend with message "[B-07] marquee wall page" and push.
+
+Acceptance criteria: the opt-in/consent note is clearly visible and worded plainly; grid is responsive; empty/error states present.
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: B8 — About page
+```
+
+---
+
+## PROMPT B9 — About page
+
+```
+Continue as Dev B, following CONTRACT.md and its design tokens.
+
+=== MY TASK RIGHT NOW: B8 — About page ===
+Build src/app/about/page.js with real, human-sounding written copy (NOT lorem ipsum, NOT generic placeholder text) covering:
+1. What this platform is and why it exists (SRM KTR students' scattered placement info problem, centralizing jobs/hackathons/resources/wall in one place).
+2. How data is sourced: student submissions, manually reviewed and approved by an admin before going public — nothing is scraped from Gmail, WhatsApp, or the college portal.
+3. A privacy note: explain exactly what data is collected (SRM email for login/authentication, whatever the student submits in forms) and that it is not shared outside the platform.
+4. The consent policy for the Marquee Wall specifically: entries appear publicly only if the student explicitly checked the consent box, and they can be removed on request.
+5. A contact line (e.g. an email address placeholder like contact@srmopportunities.example — tell me to swap in our real email once we have one).
+Style with the exact design tokens from CONTRACT.md.
+Run `npm run lint` and `npm run build`, fix errors. Commit to feat/frontend with message "[B-08] about page with real copy" and push.
+
+Acceptance criteria: no lorem ipsum or bracketed placeholder text remains except the contact email note explicitly flagged above.
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: B9 — Mobile and accessibility pass
+```
+
+---
+
+## PROMPT B10 — Mobile + accessibility pass
+
+```
+Continue as Dev B, following CONTRACT.md.
+
+=== MY TASK RIGHT NOW: B9 — Mobile + accessibility pass ===
+Go through EVERY route I own (/, /opportunities/jobs, /opportunities/hackathons, /learn, /wall, /about) and check/fix at three widths: 375px (mobile), 768px (tablet), 1280px (desktop):
+1. Fix any horizontal overflow/scroll — nothing should ever cause the page to scroll sideways at 375px.
+2. Make sure every clickable element (buttons, links, checkboxes) has a tap target of at least 44x44px on mobile.
+3. Add meaningful alt text to any images/icons, and aria-labels to icon-only buttons (like the hamburger menu icon).
+4. Add visible focus rings (Tailwind's focus:ring utilities) to all interactive elements for keyboard users.
+5. Make sure the mobile hamburger menu can be opened, navigated, and closed using only the keyboard (Tab, Enter, Escape).
+6. List every specific fix you made, file by file.
+Run `npm run lint` and `npm run build`, fix errors. Commit to feat/frontend with message "[B-09] mobile and accessibility fixes" and push.
+
+Acceptance criteria: no horizontal scroll anywhere at 375px; full list of fixes provided; keyboard navigation works for the mobile menu.
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: B10 — Polish (skeletons, 404, favicon, Open Graph)
+```
+
+---
+
+## PROMPT B11 — Polish
+
+```
+Continue as Dev B, following CONTRACT.md and its design tokens.
+
+=== MY TASK RIGHT NOW: B10 — Polish ===
+1. Replace every plain "Loading..." text across my pages with a proper skeleton loader component (add a Skeleton.js component in src/components/ if useful — animated grey placeholder blocks shaped like the real cards).
+2. Build src/app/not-found.js: a friendly styled 404 page with a link back to the homepage, matching the design tokens.
+3. Add a favicon: tell me exactly how to generate/add a simple favicon.ico into the public/ folder (or generate a simple placeholder svg-to-ico if that's easiest), and reference it correctly in the app metadata.
+4. Add Open Graph metadata (title, description, and an image if we have one) to the root layout metadata export so links to the site preview nicely when shared on WhatsApp.
+Run `npm run lint` and `npm run build`, fix errors. Commit to feat/frontend with message "[B-10] skeleton loaders, 404 page, favicon, open graph" and push.
+
+Acceptance criteria: skeleton loaders show while data is fetching instead of plain text; visiting a random unknown URL shows the styled 404 page; sharing the homepage link shows a proper preview card (test using any free OG preview checker tool if easy).
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: B11 — Merge-readiness audit
+```
+
+---
+
+## PROMPT B12 — Merge-readiness audit + open PR
+
+```
+Continue as Dev B, following CONTRACT.md.
+
+=== MY TASK RIGHT NOW: B11 — Merge-readiness audit ===
+1. Confirm I have only ever touched files listed under "Dev B owns" in CONTRACT.md — check git log/diff against main and flag anything outside that list.
+2. Run `npm run lint` and `npm run build` twice: once with NEXT_PUBLIC_USE_MOCK=true, once with NEXT_PUBLIC_USE_MOCK=false (only do the false test if Dev A has told me SYNC 2 is done and shared real Supabase values — otherwise note that this step is pending SYNC 2).
+3. List any place in my code where I assumed something about the shape of the data that Dev A should double check (e.g. assumed a field is always present).
+4. Open a Pull Request from feat/frontend into main on GitHub (tell me the exact steps), describing everything built in B0-B10.
+
+Acceptance criteria: PR is open, lint and build both clean, only owned files touched, and I have a clear list of assumptions to share with my partner before final merge.
+
+Reply with exactly this format:
+DONE
+FILES TOUCHED: (list them)
+HOW TO TEST: (2-3 beginner steps)
+CONTRACT CHANGES: none
+NEXT TASK: none — Dev B track complete. Wait for Dev A's PR to merge first, then rebase and merge mine.
+```
+
+---
+---
+
+# 🏁 FINAL MERGE (do together, in a call/chat with your partner)
+
+1. Dev A's PR (`feat/foundation` → `main`) merges first.
+2. Dev B runs `git pull origin main --rebase`, resolves nothing (there should be zero conflicts since ownership never overlapped), then merges `feat/frontend` → `main`.
+3. Both set `.env.local` to `NEXT_PUBLIC_USE_MOCK=false` and re-run the full checklist from Prompt A10 together — but now on the merged `main` branch locally.
+4. Dev A redeploys the final `main` to Vercel (Prompt A11 steps, if not already done from main).
+5. Together: delete the `SEED-TEST` rows from Supabase, and each go collect 10-15 real jobs, hackathons, resources, and ask seniors to fill the real wall form with consent.
+6. Do a final full read-through of the live site on a phone before sharing the link publicly.

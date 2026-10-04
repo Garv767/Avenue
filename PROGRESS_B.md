@@ -10,3 +10,9 @@
 - [x] Footer
 - [x] globals.css
 - [x] metadata in layout.js
+
+## Task B2 — Cards
+- [x] JobCard, HackathonCard, ResourceCard, WallCard
+- [x] Deadline status checks ("Closing soon", "Expired")
+- [x] External links target="_blank"
+- [x] Conditional rendering of Wall optional fields
